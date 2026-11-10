@@ -146,7 +146,7 @@ At most 1000 icons per font. An icon's character is four hex digits from E000 to
 
 ## MCP server
 
-The backend exposes a stateless Streamable HTTP MCP endpoint at `https://<your-api-host>/mcp`. It supports both current MCP clients and the earlier initialization handshake. Every request requires `Authorization: Bearer <personal-api-token>`. Create a read-only token in the app's Settings → API tokens section, then configure your MCP client with that endpoint URL and bearer token. Keep the token private; it is shown once and can be revoked from Settings.
+The backend exposes a stateless Streamable HTTP MCP endpoint at `https://<your-api-host>/mcp`. It supports both current MCP clients and the earlier initialization handshake. Modern `tools/list` responses include explicit cache hints for the static tool definitions. Every request requires `Authorization: Bearer <personal-api-token>`. Create a read-only token in the app's Settings → API tokens section, then configure your MCP client with that endpoint URL and bearer token. Keep the token private; it is shown once and can be revoked from Settings.
 
 Available tools are `list_projects`, `search_icons`, `list_project_icons`, `get_icon`, and `get_project_sprite`. They only return projects and icons the token owner may view. Write-scoped tokens are accepted but the MCP tools currently remain read-only. The endpoint is sessionless and returns JSON, making it suitable for serverless deployments such as the included Vercel setup.
 
