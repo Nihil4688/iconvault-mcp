@@ -29,6 +29,13 @@ const READ_POSTS = [/^\/api\/projects\/[^/]+\/icons\/download$/];
 function isReadRequest(req: Request): boolean {
   if (SAFE_METHODS.has(req.method)) return true;
   const path = req.originalUrl.split("?")[0] ?? "";
+  // The MCP endpoint currently exposes only read-only tools. Keep the token's
+  // read scope limited to the known JSON-RPC methods; if write tools are added,
+  // they must not be included here.
+  if (req.method === "POST" && /^\/mcp\/?$/.test(path)) {
+    const method = (req.body as { method?: unknown } | undefined)?.method;
+    return typeof method === "string" && ["initialize", "server/discover", "notifications/initialized", "ping", "tools/list", "tools/call"].includes(method);
+  }
   return req.method === "POST" && READ_POSTS.some((pattern) => pattern.test(path));
 }
 

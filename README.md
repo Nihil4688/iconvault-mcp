@@ -15,6 +15,7 @@ Keep SVG icons in projects and folders, and compile them into a single `sprite.s
 - Move projects in and out: export a project as one ZIP (settings, folders, icons) and import it as a new private project, in the interface or with the command line.
 - Administrators (emails in `ADMIN_EMAILS`) get a **Manage** menu in the top bar: **Manage Users** (list users, delete a user, their projects are deleted or handed to someone else) and **Manage Projects** (every project with its owner, searchable by owner, open, transfer to another owner, delete, and tick several to transfer or delete together). Both screens start with workspace totals. Try them with demo data: `npm run seed:demo` in `server/` (remove it again with `npm run seed:demo -- --remove`). The Manage button needs your e-mail in `ADMIN_EMAILS`. There are no passwords.
 - Personal API tokens (account menu, API tokens) for the command line and scripts: shown once, revocable, never admin.
+- Stateless Streamable HTTP MCP endpoint (`/mcp`) for MCP clients, authenticated with personal API tokens and the same project permissions.
 - Select icons and press Build sprite (or Build font in a font project): a font project builds the font right away and opens the Font page with the finished result and Download font as the main action; a sprite project opens the Sprite page. The icons show as "Chosen icons", and Review / edit checklist (search, folder filter, group by folder, select or deselect whole folders) changes the choice. The Font page groups its controls (Icons, Font settings, Target formats) under the actions and lists every glyph once in the codepoint mapping table.
 - Sprite section: compile all icons or one folder into a sprite in the browser; preview, copy, download `sprite.svg`, or download a ZIP with the sprite, a grid sprite, `demo.html` and `preview.png`; copy the `<use>` code for each symbol.
 - Colour theme: light, dark or follow the system (switch in the header; the choice is remembered).
@@ -142,6 +143,14 @@ At most 1000 icons per font. An icon's character is four hex digits from E000 to
 | POST | `/api/admin/projects/:projectId/transfer` | Body `{ "userId" }`: move the project to another owner |
 | GET / POST | `/api/tokens` | List your tokens (never the secret); create one (`name`; the secret is returned once). At most 10 active |
 | DELETE | `/api/tokens/:tokenId` | Revoke (immediate and permanent) |
+
+## MCP server
+
+The backend exposes a stateless Streamable HTTP MCP endpoint at `https://<your-api-host>/mcp`. It supports both current MCP clients and the earlier initialization handshake. Every request requires `Authorization: Bearer <personal-api-token>`. Create a read-only token in the app's Settings → API tokens section, then configure your MCP client with that endpoint URL and bearer token. Keep the token private; it is shown once and can be revoked from Settings.
+
+Available tools are `list_projects`, `search_icons`, `list_project_icons`, `get_icon`, and `get_project_sprite`. They only return projects and icons the token owner may view. Write-scoped tokens are accepted but the MCP tools currently remain read-only. The endpoint is sessionless and returns JSON, making it suitable for serverless deployments such as the included Vercel setup.
+
+To deploy, deploy `server/` as the Vercel project root (the existing `server/vercel.json` routes `/mcp` through the Express handler), set the server environment variables documented above, then use the deployed API domain plus `/mcp` in your MCP client. For browser-originated MCP calls, add the exact trusted site origin to `CORS_ORIGINS`; an `Origin` header is rejected when it is not explicitly allowlisted. Server-to-server MCP clients generally do not send an `Origin` header. After deployment, initialize an MCP connection and call `tools/list` to confirm the endpoint responds. Never put a personal token in public frontend source or in the URL.
 
 Admin routes need an admin **session**. A token (`Authorization: Bearer isv_…`) works for everything else a signed-in user can do, but it never has admin rights and cannot manage tokens. Only a hash of each token is stored.
 
