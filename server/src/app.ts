@@ -8,6 +8,7 @@ import folderRouter from "./routes/folderRoutes.js";
 import iconRouter from "./routes/iconRoutes.js";
 import adminRouter from "./routes/adminRoutes.js";
 import tokenRouter from "./routes/tokenRoutes.js";
+import mcpRouter from "./routes/mcpRoutes.js";
 import { errorHandler } from "./lib/errors.js";
 import { apiLimit, authLimit, configureRateLimits, limitsFromEnv, type RateLimitConfig } from "./middleware/rateLimit.js";
 import { corsOptions, securityHeaders } from "./middleware/security.js";
@@ -31,6 +32,7 @@ export function createApp(options: AppOptions = {}): Express {
   app.use(securityHeaders);
   app.use(cors(corsOptions()));
   app.use("/api", apiLimit);
+  app.use("/mcp", apiLimit);
   app.use(express.json({ limit: "5mb" }));
 
   app.get("/", (_req: Request, res: Response) => {
@@ -44,6 +46,7 @@ export function createApp(options: AppOptions = {}): Express {
   app.use("/api/projects", projectRouter);
   app.use("/api/admin", adminRouter);
   app.use("/api/tokens", tokenRouter);
+  app.use("/mcp", mcpRouter);
   app.use("/api", folderRouter);
   app.use("/api", iconRouter);
 
