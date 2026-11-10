@@ -25,6 +25,13 @@ const PROJECT_TOOLS = [
   { name: "get_project_sprite", description: "Build and return the SVG sprite for a project the user can view.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, folderId: { type: "string", description: "Optional folder id, or 'root' for uncategorized icons." } }, required: ["projectId"] } },
 ];
 
+export function createToolsListResult(modern: boolean) {
+  const tools = PROJECT_TOOLS.map((tool) => ({ ...tool, annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } }));
+  return modern
+    ? { resultType: "complete" as const, ttlMs: 300_000, cacheScope: "public" as const, tools }
+    : { tools };
+}
+
 const optionalString = z.string().trim().max(100).optional();
 const toolArgs = z.record(z.string(), z.unknown());
 function result(value: unknown) {
@@ -157,8 +164,7 @@ router.post("/", async (req, res) => {
     return;
   }
   if (body.method === "tools/list") {
-    const tools = PROJECT_TOOLS.map((tool) => ({ ...tool, annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } }));
-    res.json({ jsonrpc: "2.0", id, result: { ...(modern ? { resultType: "complete" } : {}), tools } });
+    res.json({ jsonrpc: "2.0", id, result: createToolsListResult(modern) });
     return;
   }
   if (body.method === "tools/call") {
