@@ -4,14 +4,17 @@ import { Router, type Request } from "express";
 import { z } from "zod";
 import { actorOf, loadProject, parseObjectId } from "../lib/http.js";
 import { listProjects } from "../services/projectService.js";
-import { listIcons, searchIcons } from "../services/iconService.js";
+import { copyIcons, importSvg, listIcons, searchIcons, serializeIcon } from "../services/iconService.js";
 import { buildProjectSprite } from "../services/spriteService.js";
 import Icon from "../models/Icon.js";
 import { requireDb } from "../middleware/requireDb.js";
 import { requireUser } from "../middleware/requireUser.js";
 import { heavyLimit } from "../middleware/rateLimit.js";
-import { listProjectsQuerySchema } from "../lib/validation.js";
+import { copyIconsSchema, listProjectsQuerySchema, pasteIconSchema } from "../lib/validation.js";
 import { toHttpError } from "../lib/errors.js";
+import { recordRequestActivity } from "../services/activityLogService.js";
+import mongoose from "mongoose";
+import { assertFolderInProject } from "../services/folderService.js";
 
 const router = Router();
 const MODERN_PROTOCOL = "2026-07-28";
@@ -23,10 +26,12 @@ const PROJECT_TOOLS = [
   { name: "list_project_icons", description: "List icons in a project the user can view, optionally filtered by name, folder, or tag.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, search: { type: "string", maxLength: 100 }, folderId: { type: "string", description: "Folder id, or 'root' for uncategorized icons." }, tag: { type: "string", maxLength: 40 }, limit: { type: "integer", minimum: 1, maximum: 100 }, includeSvg: { type: "boolean" } }, required: ["projectId"] } },
   { name: "get_icon", description: "Get an icon's metadata and sanitized SVG markup, if its project is visible to the user.", inputSchema: { type: "object", properties: { iconId: { type: "string" } }, required: ["iconId"] } },
   { name: "get_project_sprite", description: "Build and return the SVG sprite for a project the user can view.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, folderId: { type: "string", description: "Optional folder id, or 'root' for uncategorized icons." } }, required: ["projectId"] } },
+  { name: "add_icon", description: "Add an SVG icon from source code to a project you own. Requires a write token.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, name: { type: "string", maxLength: 100 }, rawSvg: { type: "string", maxLength: 1000000 }, folderId: { type: ["string", "null"] }, tags: { type: "array", items: { type: "string", maxLength: 40 }, maxItems: 50 }, optimize: { type: "boolean" }, strategy: { type: "string", enum: ["rename", "replace", "skip"] } }, required: ["projectId", "rawSvg"] }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } },
+  { name: "copy_icons", description: "Copy selected icons from another visible project into a project you own. Requires a write token.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, sourceProjectId: { type: "string" }, iconIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 500 }, folderId: { type: ["string", "null"] }, strategy: { type: "string", enum: ["rename", "replace", "skip"] }, optimize: { type: "boolean" } }, required: ["projectId", "sourceProjectId", "iconIds"] }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } },
 ];
 
 export function createToolsListResult(modern: boolean) {
-  const tools = PROJECT_TOOLS.map((tool) => ({ ...tool, annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } }));
+  const tools = PROJECT_TOOLS.map((tool) => ({ ...tool, annotations: ("annotations" in tool ? tool.annotations : undefined) ?? { readOnlyHint: true, destructiveHint: false, openWorldHint: false } }));
   return modern
     ? { resultType: "complete" as const, ttlMs: 300_000, cacheScope: "public" as const, tools }
     : { tools };
@@ -91,6 +96,34 @@ async function callTool(req: Request, name: string, rawArgs: unknown) {
       const sprite = await buildProjectSprite(project._id, project.prefix ?? "icon", folder);
       return { content: [{ type: "text", text: sprite.xml }], structuredContent: { iconCount: sprite.ids.length, svg: sprite.xml } };
     }
+    case "add_icon": {
+      const input = pasteIconSchema.extend({ projectId: z.string().min(1).max(100) }).strict().parse(args);
+      const project = await loadProject(actor, input.projectId, "edit");
+      const folderId = input.folderId ? parseObjectId(input.folderId, "folder id") : null;
+      await assertFolderInProject(project._id, folderId);
+      const outcome = await importSvg(project._id, { name: input.name, raw: input.rawSvg, folderId, tags: input.tags }, { strategy: input.strategy, optimize: input.optimize });
+      if (outcome.status === "skipped") return result({ outcome: "skipped", reason: outcome.reason });
+      await recordRequestActivity(req, project, {
+        actionDone: outcome.status === "created" ? "upload" : "update", entityType: "icon", entityId: outcome.icon._id, entityName: outcome.icon.name,
+        details: { source: "mcp", outcome: outcome.status, byteSize: outcome.icon.byteSize, folderId: outcome.icon.folderId ? String(outcome.icon.folderId) : null, tags: outcome.icon.tags },
+      });
+      return result({ outcome: outcome.status, icon: serializeIcon(outcome.icon) });
+    }
+    case "copy_icons": {
+      const input = copyIconsSchema.extend({ projectId: z.string().min(1).max(100) }).strict().parse(args);
+      const target = await loadProject(actor, input.projectId, "edit");
+      const source = await loadProject(actor, input.sourceProjectId, "view");
+      const summary = await copyIcons(target._id, source._id, input.iconIds.map((id) => parseObjectId(id, "icon id")), {
+        strategy: input.strategy, optimize: input.optimize, folderId: input.folderId ? parseObjectId(input.folderId, "folder id") : null,
+      });
+      const affected = [...summary.created, ...summary.replaced].map((icon) => new mongoose.Types.ObjectId(icon.id));
+      if (affected.length > 0) await recordRequestActivity(req, target, {
+        actionDone: "copy", entityType: "icon", entityId: affected.length === 1 ? affected[0] ?? null : null,
+        details: { sourceProjectId: String(source._id), sourceProjectName: source.name, createdCount: summary.created.length, replacedCount: summary.replaced.length, affectedCount: affected.length, skippedCount: summary.skipped.length, errorCount: summary.errors.length },
+        affectedEntityIds: affected, result: summary.errors.length > 0 ? "partial" : "success",
+      });
+      return result(summary);
+    }
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -110,7 +143,7 @@ router.get("/", (_req, res) => {
 router.use(requireDb, requireUser);
 router.use((req, res, next) => {
   const body = req.body as { method?: unknown; params?: { name?: unknown } } | undefined;
-  if (body?.method === "tools/call" && body.params?.name === "get_project_sprite") {
+  if (body?.method === "tools/call" && typeof body.params?.name === "string" && ["get_project_sprite", "add_icon", "copy_icons"].includes(body.params.name)) {
     heavyLimit(req, res, next);
     return;
   }
@@ -150,7 +183,7 @@ router.post("/", async (req, res) => {
     return;
   }
   if (body.method === "server/discover" && modern) {
-    res.json({ jsonrpc: "2.0", id, result: { resultType: "complete", supportedVersions: SUPPORTED_PROTOCOLS, capabilities: { tools: {} }, _meta: { "io.modelcontextprotocol/serverInfo": { name: "iconvault", version: "1.0.0" } }, instructions: "Read-only access to projects and icons available to the authenticated IconVault user." } });
+    res.json({ jsonrpc: "2.0", id, result: { resultType: "complete", supportedVersions: SUPPORTED_PROTOCOLS, capabilities: { tools: {} }, _meta: { "io.modelcontextprotocol/serverInfo": { name: "iconvault", version: "1.0.0" } }, instructions: "Read projects and icons with a read token. Use a write token to add SVG source to projects you own or copy icons from other visible projects." } });
     return;
   }
   if (body.method === "initialize") {
