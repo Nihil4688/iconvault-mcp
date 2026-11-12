@@ -33,6 +33,9 @@ export function createApp(options: AppOptions = {}): Express {
   app.use(cors(corsOptions()));
   app.use("/api", apiLimit);
   app.use("/mcp", apiLimit);
+  // MCP file inputs use base64 JSON, so allow a bounded body large enough for a
+  // supported font or SVG/ZIP batch while retaining the smaller API body cap.
+  app.use("/mcp", express.json({ limit: "36mb" }));
   app.use(express.json({ limit: "5mb" }));
 
   app.get("/", (_req: Request, res: Response) => {
