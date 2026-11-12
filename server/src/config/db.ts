@@ -1,12 +1,5 @@
 // MongoDB connection helper. Loads models and exposes ensureConnected() / connectDb() for the rest of the server.
 import mongoose from "mongoose";
-import ActivityLog from "../models/ActivityLog.js";
-import User from "../models/User.js";
-import ApiToken from "../models/ApiToken.js";
-import Project from "../models/Project.js";
-import Folder from "../models/Folder.js";
-import Icon from "../models/Icon.js";
-import IconVersion from "../models/IconVersion.js";
 
 // Connect to MongoDB Atlas using MONGODB_URI from the environment. Caches the connection across module reloads in dev to avoid exhausting the connection pool.
 // The URI is read lazily inside connectDb() (not at import time) so a missing value surfaces as a normal rejected connection attempt. That lets the server boot, log the problem, and answer API calls with 503 instead of crashing during module load.
@@ -44,25 +37,6 @@ export async function connectDb(): Promise<typeof mongoose> {
   const connection = mongoose
     .connect(MONGODB_URI, {
       serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS,
-    })
-    .then(async (m) => {
-      // Reconcile the on-disk collection indexes with the schemas defined in code. Mongoose only creates missing indexes on its own and never drops ones the schema no longer references; syncIndexes does both in one round trip per model.
-      try {
-        await ActivityLog.syncIndexes();
-        await User.syncIndexes();
-        await Project.syncIndexes();
-        await Folder.syncIndexes();
-        await Icon.syncIndexes();
-        await IconVersion.syncIndexes();
-        await ApiToken.syncIndexes();
-      } catch (err) {
-        // Don't fail the boot just because the index sync didn't land; surface the error in the logs so it can be diagnosed without taking the API down.
-        console.error(
-          "[db] Index reconciliation failed:",
-          err instanceof Error ? err.message : err,
-        );
-      }
-      return m;
     })
     .catch((err) => {
       // Drop the cached promise so the next call can retry instead of replaying this failure forever.

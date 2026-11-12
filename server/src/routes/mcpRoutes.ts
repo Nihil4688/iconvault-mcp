@@ -74,7 +74,7 @@ async function callTool(req: Request, name: string, rawArgs: unknown) {
       const input = z.object({ projectId: z.string().min(1).max(100), search: optionalString, folderId: z.string().max(100).optional(), tag: z.string().trim().max(40).optional(), limit: z.number().int().min(1).max(100).optional(), includeSvg: z.boolean().optional() }).strict().parse(args);
       const project = await loadProject(actor, input.projectId, "view");
       const folder = input.folderId === undefined ? "all" : input.folderId === "root" ? "root" : parseObjectId(input.folderId, "folder id");
-      const limit = input.includeSvg ? Math.min(input.limit ?? 50, 3) : input.limit ?? 50;
+      const limit = input.includeSvg ? Math.min(input.limit ?? 100, 3) : input.limit ?? 100;
       return result(await listIcons(project._id, { folder, includeSubfolders: false, search: input.search, tag: input.tag, trash: false, sort: "name", page: 1, limit, withSvg: input.includeSvg ?? false }));
     }
     case "get_icon": {
