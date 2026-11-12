@@ -149,6 +149,7 @@ describe("limits, sign out everywhere, token scopes (HTTP, throwaway database)",
         const r = await h.call(read, method, path, body);
         assert.equal(r.status, 403, `${method} ${path}`);
         assert.match(r.body.error, /read-only/);
+        assert.match(r.body.error, /read\/write API token/);
       }
       assert.equal((await h.call(user.token, "GET", `/api/projects/${project.id}`)).status, 200);
     });

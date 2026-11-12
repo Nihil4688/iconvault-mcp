@@ -1,47 +1,18 @@
 // Stateless Streamable HTTP MCP endpoint. Every request is authenticated with
 // the same personal API token used by the REST API.
-import { Router, type Request } from "express";
-import { z } from "zod";
-import { actorOf, loadProject, parseObjectId } from "../lib/http.js";
-import { listProjects } from "../services/projectService.js";
-import { copyIcons, importSvg, listIcons, searchIcons, serializeIcon } from "../services/iconService.js";
-import { buildProjectSprite } from "../services/spriteService.js";
-import Icon from "../models/Icon.js";
+import { Router } from "express";
 import { requireDb } from "../middleware/requireDb.js";
 import { requireUser } from "../middleware/requireUser.js";
 import { heavyLimit } from "../middleware/rateLimit.js";
-import { copyIconsSchema, listProjectsQuerySchema, pasteIconSchema } from "../lib/validation.js";
 import { toHttpError } from "../lib/errors.js";
-import { recordRequestActivity } from "../services/activityLogService.js";
-import mongoose from "mongoose";
-import { assertFolderInProject } from "../services/folderService.js";
+import { callMcpTool, createToolsListResult, HEAVY_MCP_TOOLS, isMcpTool } from "./mcpTools.js";
+
+export { createToolsListResult } from "./mcpTools.js";
 
 const router = Router();
 const MODERN_PROTOCOL = "2026-07-28";
 const LEGACY_PROTOCOLS = ["2025-11-25", "2025-06-18", "2025-03-26"];
 const SUPPORTED_PROTOCOLS = [MODERN_PROTOCOL, ...LEGACY_PROTOCOLS];
-const PROJECT_TOOLS = [
-  { name: "list_projects", description: "List IconVault projects visible to the authenticated user.", inputSchema: { type: "object", properties: { search: { type: "string", maxLength: 100 }, scope: { type: "string", enum: ["all", "mine", "public"] }, purpose: { type: "string", enum: ["all", "sprite", "font"] }, limit: { type: "integer", minimum: 1, maximum: 100 } } } },
-  { name: "search_icons", description: "Search active icons in projects visible to the authenticated user.", inputSchema: { type: "object", properties: { query: { type: "string", minLength: 1, maxLength: 100 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, required: ["query"] } },
-  { name: "list_project_icons", description: "List icons in a project the user can view, optionally filtered by name, folder, or tag.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, search: { type: "string", maxLength: 100 }, folderId: { type: "string", description: "Folder id, or 'root' for uncategorized icons." }, tag: { type: "string", maxLength: 40 }, limit: { type: "integer", minimum: 1, maximum: 100 }, includeSvg: { type: "boolean" } }, required: ["projectId"] } },
-  { name: "get_icon", description: "Get an icon's metadata and sanitized SVG markup, if its project is visible to the user.", inputSchema: { type: "object", properties: { iconId: { type: "string" } }, required: ["iconId"] } },
-  { name: "get_project_sprite", description: "Build and return the SVG sprite for a project the user can view.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, folderId: { type: "string", description: "Optional folder id, or 'root' for uncategorized icons." } }, required: ["projectId"] } },
-  { name: "add_icon", description: "Add an SVG icon from source code to a project you own. Requires a write token.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, name: { type: "string", maxLength: 100 }, rawSvg: { type: "string", maxLength: 1000000 }, folderId: { type: ["string", "null"] }, tags: { type: "array", items: { type: "string", maxLength: 40 }, maxItems: 50 }, optimize: { type: "boolean" }, strategy: { type: "string", enum: ["rename", "replace", "skip"] } }, required: ["projectId", "rawSvg"] }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } },
-  { name: "copy_icons", description: "Copy selected icons from another visible project into a project you own. Requires a write token.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, sourceProjectId: { type: "string" }, iconIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 500 }, folderId: { type: ["string", "null"] }, strategy: { type: "string", enum: ["rename", "replace", "skip"] }, optimize: { type: "boolean" } }, required: ["projectId", "sourceProjectId", "iconIds"] }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } },
-];
-
-export function createToolsListResult(modern: boolean) {
-  const tools = PROJECT_TOOLS.map((tool) => ({ ...tool, annotations: ("annotations" in tool ? tool.annotations : undefined) ?? { readOnlyHint: true, destructiveHint: false, openWorldHint: false } }));
-  return modern
-    ? { resultType: "complete" as const, ttlMs: 300_000, cacheScope: "public" as const, tools }
-    : { tools };
-}
-
-const optionalString = z.string().trim().max(100).optional();
-const toolArgs = z.record(z.string(), z.unknown());
-function result(value: unknown) {
-  return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
-}
 function errorResult(error: unknown) {
   return { isError: true, content: [{ type: "text", text: toHttpError(error).body.error }] };
 }
@@ -61,74 +32,6 @@ function originAllowed(origin: string | undefined) {
   return allowed.includes(origin.replace(/\/+$/, ""));
 }
 
-async function callTool(req: Request, name: string, rawArgs: unknown) {
-  const args = toolArgs.parse(rawArgs ?? {});
-  const actor = actorOf(req);
-  switch (name) {
-    case "list_projects": {
-      const input = z.object({ search: optionalString, scope: z.enum(["all", "mine", "public"]).optional(), purpose: z.enum(["all", "sprite", "font"]).optional(), limit: z.number().int().min(1).max(100).optional() }).strict().parse(args);
-      const query = listProjectsQuerySchema.parse({ search: input.search, scope: input.scope, purpose: input.purpose, limit: input.limit ?? 50 });
-      const listed = await listProjects(actor, query);
-      return result({ ...listed, projects: listed.projects.map(({ sampleIcons: _samples, ...project }) => project) });
-    }
-    case "search_icons": {
-      const input = z.object({ query: z.string().trim().min(1).max(100), limit: z.number().int().min(1).max(100).optional() }).strict().parse(args);
-      return result(await searchIcons(actor, input.query, 1, input.limit ?? 50));
-    }
-    case "list_project_icons": {
-      const input = z.object({ projectId: z.string().min(1).max(100), search: optionalString, folderId: z.string().max(100).optional(), tag: z.string().trim().max(40).optional(), limit: z.number().int().min(1).max(100).optional(), includeSvg: z.boolean().optional() }).strict().parse(args);
-      const project = await loadProject(actor, input.projectId, "view");
-      const folder = input.folderId === undefined ? "all" : input.folderId === "root" ? "root" : parseObjectId(input.folderId, "folder id");
-      const limit = input.includeSvg ? Math.min(input.limit ?? 100, 3) : input.limit ?? 100;
-      return result(await listIcons(project._id, { folder, includeSubfolders: false, search: input.search, tag: input.tag, trash: false, sort: "name", page: 1, limit, withSvg: input.includeSvg ?? false }));
-    }
-    case "get_icon": {
-      const { iconId } = z.object({ iconId: z.string().min(1).max(100) }).strict().parse(args);
-      const icon = await Icon.findById(parseObjectId(iconId, "icon id"));
-      if (!icon || icon.deletedAt) throw new Error("Icon not found.");
-      await loadProject(actor, icon.projectId, "view");
-      return result({ id: String(icon._id), projectId: String(icon.projectId), name: icon.name, slug: icon.slug, tags: icon.tags, viewBox: icon.viewBox, width: icon.width, height: icon.height, svg: icon.svg });
-    }
-    case "get_project_sprite": {
-      const input = z.object({ projectId: z.string().min(1).max(100), folderId: z.string().max(100).optional() }).strict().parse(args);
-      const project = await loadProject(actor, input.projectId, "view");
-      const folder = input.folderId === undefined ? null : input.folderId === "root" ? "root" : parseObjectId(input.folderId, "folder id");
-      const sprite = await buildProjectSprite(project._id, project.prefix ?? "icon", folder);
-      return { content: [{ type: "text", text: sprite.xml }], structuredContent: { iconCount: sprite.ids.length, svg: sprite.xml } };
-    }
-    case "add_icon": {
-      const input = pasteIconSchema.extend({ projectId: z.string().min(1).max(100) }).strict().parse(args);
-      const project = await loadProject(actor, input.projectId, "edit");
-      const folderId = input.folderId ? parseObjectId(input.folderId, "folder id") : null;
-      await assertFolderInProject(project._id, folderId);
-      const outcome = await importSvg(project._id, { name: input.name, raw: input.rawSvg, folderId, tags: input.tags }, { strategy: input.strategy, optimize: input.optimize });
-      if (outcome.status === "skipped") return result({ outcome: "skipped", reason: outcome.reason });
-      await recordRequestActivity(req, project, {
-        actionDone: outcome.status === "created" ? "upload" : "update", entityType: "icon", entityId: outcome.icon._id, entityName: outcome.icon.name,
-        details: { source: "mcp", outcome: outcome.status, byteSize: outcome.icon.byteSize, folderId: outcome.icon.folderId ? String(outcome.icon.folderId) : null, tags: outcome.icon.tags },
-      });
-      return result({ outcome: outcome.status, icon: serializeIcon(outcome.icon) });
-    }
-    case "copy_icons": {
-      const input = copyIconsSchema.extend({ projectId: z.string().min(1).max(100) }).strict().parse(args);
-      const target = await loadProject(actor, input.projectId, "edit");
-      const source = await loadProject(actor, input.sourceProjectId, "view");
-      const summary = await copyIcons(target._id, source._id, input.iconIds.map((id) => parseObjectId(id, "icon id")), {
-        strategy: input.strategy, optimize: input.optimize, folderId: input.folderId ? parseObjectId(input.folderId, "folder id") : null,
-      });
-      const affected = [...summary.created, ...summary.replaced].map((icon) => new mongoose.Types.ObjectId(icon.id));
-      if (affected.length > 0) await recordRequestActivity(req, target, {
-        actionDone: "copy", entityType: "icon", entityId: affected.length === 1 ? affected[0] ?? null : null,
-        details: { sourceProjectId: String(source._id), sourceProjectName: source.name, createdCount: summary.created.length, replacedCount: summary.replaced.length, affectedCount: affected.length, skippedCount: summary.skipped.length, errorCount: summary.errors.length },
-        affectedEntityIds: affected, result: summary.errors.length > 0 ? "partial" : "success",
-      });
-      return result(summary);
-    }
-    default:
-      throw new Error(`Unknown tool: ${name}`);
-  }
-}
-
 router.use((req, res, next) => {
   if (!originAllowed(req.header("origin"))) {
     res.status(403).json({ error: "Origin is not allowed for MCP. Configure CORS_ORIGINS with this exact site origin." });
@@ -143,7 +46,7 @@ router.get("/", (_req, res) => {
 router.use(requireDb, requireUser);
 router.use((req, res, next) => {
   const body = req.body as { method?: unknown; params?: { name?: unknown } } | undefined;
-  if (body?.method === "tools/call" && typeof body.params?.name === "string" && ["get_project_sprite", "add_icon", "copy_icons"].includes(body.params.name)) {
+  if (body?.method === "tools/call" && typeof body.params?.name === "string" && HEAVY_MCP_TOOLS.has(body.params.name)) {
     heavyLimit(req, res, next);
     return;
   }
@@ -207,7 +110,11 @@ router.post("/", async (req, res) => {
       return;
     }
     try {
-      const toolResult = await callTool(req, params.name, params.arguments);
+      if (!isMcpTool(params.name)) {
+        res.json(rpcError(id, -32602, `Unknown tool: ${params.name}`));
+        return;
+      }
+      const toolResult = await callMcpTool(req, params.name, params.arguments);
       res.json({ jsonrpc: "2.0", id, result: { ...(modern ? { resultType: "complete" } : {}), ...toolResult } });
     } catch (error) {
       res.json({ jsonrpc: "2.0", id, result: { ...(modern ? { resultType: "complete" } : {}), ...errorResult(error) } });
